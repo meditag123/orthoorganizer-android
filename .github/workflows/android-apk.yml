@@ -1,6 +1,10 @@
 name: Build OrthoOrganizer Android APK
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-apk.yml'
   workflow_dispatch:
   schedule:
     - cron: '17 3 * * 1'
