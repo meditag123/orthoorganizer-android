@@ -1,4 +1,5 @@
 name: Build OrthoOrganizer Android APK
+# Rebuild after classic login layout restoration
 
 on:
   push:
