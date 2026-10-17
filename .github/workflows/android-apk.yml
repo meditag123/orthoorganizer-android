@@ -1,5 +1,5 @@
 name: Build OrthoOrganizer Android APK
-# Rebuild after classic login layout restoration
+# Build 1.0.7 after fixing Android storage exceptions
 
 on:
   push:
