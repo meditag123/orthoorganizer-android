@@ -1,5 +1,5 @@
 name: Build Windows 0.4.21 Surgery Notes Hotfix
-# Rebuild with multiline Excel notes visibility fix and corrected test fixture
+# Rebuild with single-cell surgical report layout; no continuation text
 
 on:
   push:
