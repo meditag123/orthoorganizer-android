@@ -1,5 +1,5 @@
 name: Build Windows 0.4.21 Surgery Notes Hotfix
-# Rebuild with multiline Excel notes visibility fix
+# Rebuild with multiline Excel notes visibility fix and corrected test fixture
 
 on:
   push:
