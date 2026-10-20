@@ -1,0 +1,98 @@
+name: Build Windows 0.4.21 Surgery Notes Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-notes-hotfix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 65
+    steps:
+      - name: Checkout private source using limited token
+        shell: pwsh
+        env:
+          PRIVATE_SOURCE_TOKEN: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if (-not $env:PRIVATE_SOURCE_TOKEN) { throw 'Missing ORTHO_SOURCE_READ_TOKEN secret' }
+          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:PRIVATE_SOURCE_TOKEN"))
+          git -c "http.extraheader=AUTHORIZATION: basic $basic" clone --depth 1 https://github.com/meditag123/orthoorganizer-source.git source
+          if ($LASTEXITCODE -ne 0) { throw 'Private source checkout failed' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify missing-created surgery bug is fixed
+        shell: pwsh
+        run: |
+          $code=Get-Content source/legacy_desktop/source/core.py -Raw
+          if ($code.Contains("record['created'] = old['created']")) { throw 'Unsafe legacy surgery edit path remains' }
+          if (-not $code.Contains("old.get('created')")) { throw 'Missing created fallback' }
+      - name: Verify original NSIS installation identity and synthetic backup
+        shell: pwsh
+        working-directory: source
+        run: ./legacy_desktop/source/ci/verify_original_install.ps1
+      - name: Python source tests
+        shell: pwsh
+        working-directory: source/legacy_desktop/source
+        run: |
+          python -m pip install cryptography==44.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          python -m compileall -q .
+          if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+      - name: Restore official OCR and original icons
+        shell: pwsh
+        working-directory: source
+        run: |
+          $ErrorActionPreference='Stop'
+          $original=Join-Path $env:RUNNER_TEMP 'OrthoOrganizer_Setup_v0_4_18.exe'
+          $unpack=Join-Path $env:RUNNER_TEMP 'original-ocr-files'
+          & 7z x $original "-o$unpack" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Original setup extract failed' }
+          $ocr=Get-ChildItem $unpack -Filter tesseract.exe -Recurse -File | Select-Object -First 1
+          if (-not $ocr) { throw 'Official installer OCR missing' }
+          $dst='legacy_desktop/source/tesseract'
+          New-Item -ItemType Directory -Path $dst -Force | Out-Null
+          Copy-Item -Path (Join-Path $ocr.DirectoryName '*') -Destination $dst -Recurse -Force
+          foreach ($language in @('ell','eng')) {
+            if (-not (Test-Path "$dst/tessdata/$language.traineddata")) {
+              throw "Missing $language OCR language pack"
+            }
+          }
+          New-Item -ItemType Directory -Path 'legacy_desktop/source/assets' -Force | Out-Null
+          Copy-Item 'assets/orthoorganizer.ico' 'legacy_desktop/source/assets/orthoorganizer_full.ico' -Force
+          Copy-Item 'assets/orthoorganizer_logo.png' 'legacy_desktop/source/assets/orthoorganizer_logo.png' -Force
+      - name: Build verified in-place Windows installer
+        shell: pwsh
+        working-directory: source/legacy_desktop/source
+        run: |
+          $ErrorActionPreference='Stop'
+          ./build_windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed' }
+          if (-not (Test-Path 'dist/OrthoOrganizer/OrthoOrganizer.exe')) { throw 'Desktop exe missing' }
+          if (Test-Path 'dist/OrthoOrganizer/portable.flag') { throw 'Portable mode must not be installed over existing app' }
+          $makensis=Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'NSIS/makensis.exe'
+          if (-not (Test-Path $makensis)) { choco install nsis -y --no-progress }
+          if (-not (Test-Path $makensis)) { throw 'NSIS compiler missing' }
+          New-Item -ItemType Directory -Path 'dist/installer' -Force | Out-Null
+          & $makensis "/DORIGINAL_NSIS_KEY=$env:ORIGINAL_NSIS_KEY" installer_upgrade.nsi
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+      - name: Test in-place upgrade preserves existing files
+        shell: pwsh
+        working-directory: source
+        run: ./legacy_desktop/source/ci/test_upgrade.ps1
+      - name: Upload corrected Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Windows-0.4.21-Notes-Hotfix
+          path: source/legacy_desktop/source/dist/installer/OrthoOrganizer_Setup_v0_4_21_Upgrade_RC.exe
+          if-no-files-found: error
+          retention-days: 30
