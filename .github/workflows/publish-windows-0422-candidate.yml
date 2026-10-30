@@ -1,0 +1,60 @@
+name: Publish Windows 0.4.22 candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-windows-0422-candidate.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: windows-v0.4.22-rc1
+    steps:
+      - name: Download tested Windows installer
+        run: gh run download 41117657129 --name OrthoOrganizer-Windows-0.4.22-Hospitals-Roster --dir package
+      - name: Verify installer integrity and source identity
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          root=Path('package')
+          executable=root/'OrthoOrganizer_Setup_v0_4_22_Upgrade_RC.exe'
+          expected=(root/'SHA256SUMS.txt').read_text(encoding='utf-8-sig').split()[0].lower()
+          assert executable.open('rb').read(2)==b'MZ', 'Not a Windows executable'
+          assert executable.stat().st_size>50_000_000, 'Unexpected installer size'
+          assert hashlib.sha256(executable.read_bytes()).hexdigest()==expected, 'Checksum mismatch'
+          assert '270a48f4b452bc7e7fbb6d43bde2925882e411fb' in (root/'SOURCE_COMMIT.txt').read_text(encoding='utf-8-sig')
+          print('Installer checksum and tested source confirmed')
+          PY
+      - name: Publish downloadable release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo '::error::Candidate release already exists; refusing to overwrite it.'
+            exit 1
+          fi
+          cat > release-notes.md <<'MD'
+          Δοκιμαστική έκδοση Windows 0.4.22 με επιλογή νοσοκομείου/κλινικής ανά χειρουργείο, προσθήκη νέων ιδρυμάτων, τελευταία επιλογή και φίλτρα αρχείου, στατιστικών και εξαγωγών.
+
+          Η αναγνώριση φωτογραφιών προγραμμάτων διαβάζει τα πραγματικά κελιά και ξεχωρίζει ενεργές από ετοιμότητας. Η φωτογραφία Νοεμβρίου 2026 ελέγχθηκε τοπικά με σωστές και τις 10 εγγραφές.
+
+          Οι παλιές καταχωρίσεις διατηρούν το αρχικό τους ίδρυμα. Η αποθήκευση επέμβασης σε ιδιωτική κλινική διατηρεί το νοσοκομείο προφίλ.
+
+          Πέρασαν οι δοκιμές Windows, η αναβάθμιση στην ίδια θέση εγκατάστασης με διατήρηση δοκιμαστικών αρχείων/backup και η εκκίνηση του εγκατεστημένου EXE με δοκιμαστικά δεδομένα. Περιλαμβάνονται το αρχικό εικονίδιο και το ελληνικό/αγγλικό OCR.
+
+          Λήψη και χειροκίνητη εκτέλεση του OrthoOrganizer_Setup_v0_4_22_Upgrade_RC.exe.
+          MD
+          gh release create "$TAG" package/OrthoOrganizer_Setup_v0_4_22_Upgrade_RC.exe package/SHA256SUMS.txt package/SOURCE_COMMIT.txt \
+            --title "OrthoOrganizer Windows v0.4.22 RC1 — Νοσοκομεία και εφημερίες" \
+            --notes-file release-notes.md --prerelease --latest=false
