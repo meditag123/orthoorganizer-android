@@ -1,0 +1,157 @@
+name: Build and publish Windows 0.4.25
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-0425-overview-cards.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: ortho-windows-0425
+  cancel-in-progress: true
+
+env:
+  SOURCE_COMMIT: f556ddbbb7cbec65258edba429a0e6b3e12f89a9
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 65
+    steps:
+      - name: Checkout exact private candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: meditag123/orthoorganizer-source
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install desktop dependencies
+        working-directory: source/legacy_desktop/source
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+      - name: Test desktop source and Qt import controls
+        working-directory: source/legacy_desktop/source
+        shell: pwsh
+        run: |
+          python -m compileall -q .
+          if ($LASTEXITCODE -ne 0) { throw 'Source compilation failed' }
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
+      - name: Verify the original installation and synthetic backup
+        working-directory: source
+        shell: pwsh
+        run: ./legacy_desktop/source/ci/verify_original_install.ps1
+      - name: Restore official OCR runtime and branding
+        working-directory: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $original=Join-Path $env:RUNNER_TEMP 'OrthoOrganizer_Setup_v0_4_18.exe'
+          $unpack=Join-Path $env:RUNNER_TEMP 'original-ocr-files'
+          & 7z x $original "-o$unpack" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Original installer extraction failed' }
+          $ocr=Get-ChildItem $unpack -Filter tesseract.exe -Recurse -File | Select-Object -First 1
+          if (-not $ocr) { throw 'Official Tesseract runtime missing' }
+          $dst='legacy_desktop/source/tesseract'
+          New-Item -ItemType Directory -Path $dst -Force | Out-Null
+          Copy-Item -Path (Join-Path $ocr.DirectoryName '*') -Destination $dst -Recurse -Force
+          foreach ($language in @('ell','eng')) {
+            if (-not (Test-Path "$dst/tessdata/$language.traineddata")) {
+              throw "Missing $language OCR language pack"
+            }
+          }
+          New-Item -ItemType Directory -Path 'legacy_desktop/source/assets' -Force | Out-Null
+          Copy-Item 'assets/orthoorganizer.ico' 'legacy_desktop/source/assets/orthoorganizer_full.ico' -Force
+          Copy-Item 'assets/orthoorganizer_logo.png' 'legacy_desktop/source/assets/orthoorganizer_logo.png' -Force
+      - name: Validate the actual roster with the bundled Windows OCR
+        working-directory: source/legacy_desktop/source
+        shell: pwsh
+        env:
+          ORTHO_TEST_ROSTER_IMAGE: tests/fixtures/november-2026-roster.jpg
+        run: |
+          python -m unittest discover -s tests -p test_roster_recognition.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Actual roster OCR regression failed' }
+      - name: Build Windows 0.4.25 and its installer
+        working-directory: source/legacy_desktop/source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./build_windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed' }
+          if (-not (Test-Path 'dist/OrthoOrganizer/OrthoOrganizer.exe')) { throw 'Desktop executable missing' }
+          if (Test-Path 'dist/OrthoOrganizer/portable.flag') { throw 'Unexpected portable mode in installed build' }
+          $makensis=Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'NSIS/makensis.exe'
+          if (-not (Test-Path $makensis)) { choco install nsis -y --no-progress }
+          if (-not (Test-Path $makensis)) { throw 'NSIS compiler missing' }
+          New-Item -ItemType Directory -Path 'dist/installer' -Force | Out-Null
+          & $makensis "/DORIGINAL_NSIS_KEY=$env:ORIGINAL_NSIS_KEY" installer_upgrade.nsi
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+      - name: Test upgrade keeps installation, archive and backup
+        working-directory: source
+        shell: pwsh
+        run: ./legacy_desktop/source/ci/test_upgrade.ps1
+      - name: Smoke test the installed executable using synthetic demo data
+        shell: pwsh
+        run: |
+          $exe=Join-Path $env:ORIGINAL_APP_DIRECTORY 'OrthoOrganizer.exe'
+          $process=Start-Process -FilePath $exe -ArgumentList '--demo' -PassThru
+          Start-Sleep -Seconds 8
+          if ($process.HasExited) { throw "Desktop exited during startup: $($process.ExitCode)" }
+          $null=$process.CloseMainWindow()
+          if (-not $process.WaitForExit(10000)) { $process.Kill() }
+          Write-Host 'PASS: installed desktop stays running with synthetic demo data.'
+      - name: Record source and installer checksum
+        working-directory: source/legacy_desktop/source/dist/installer
+        shell: pwsh
+        run: |
+          $file='OrthoOrganizer_Setup_v0_4_25_Upgrade_RC.exe'
+          $hash=(Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          "$hash  $file" | Set-Content SHA256SUMS.txt -Encoding utf8
+          "Source commit: $env:SOURCE_COMMIT" | Set-Content SOURCE_COMMIT.txt -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Windows-0.4.25-Overview-Cards
+          path: |
+            source/legacy_desktop/source/dist/installer/OrthoOrganizer_Setup_v0_4_25_Upgrade_RC.exe
+            source/legacy_desktop/source/dist/installer/SHA256SUMS.txt
+            source/legacy_desktop/source/dist/installer/SOURCE_COMMIT.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish tested Windows 0.4.25 candidate
+        working-directory: source/legacy_desktop/source/dist/installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: windows-v0.4.25-rc1
+        run: |
+          $ErrorActionPreference='Stop'
+          $existing=gh release view $env:TAG --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists; refusing overwrite' }
+          @'
+          OrthoOrganizer Windows 0.4.25 RC1
+
+          Νέα εμφάνιση εφημεριών στην Επισκόπηση, με ξεχωριστές κάρτες «Ενεργές» και «Ετοιμότητας», σύμφωνα με το δείγμα.
+
+          Κάθε γραμμή δείχνει ημέρα και μήνα, ημέρα εβδομάδας, νοσοκομείο/κλινική και «σήμερα», «αύριο» ή πόσες ημέρες απομένουν. Διατηρούνται οι ρόλοι 1ος/2ος/3ος και οι ξεχωριστές καταχωρίσεις πολλών ιδρυμάτων. Οι κλειστές εφημερίες εμφανίζονται σε πρόσθετη κάρτα όταν υπάρχουν.
+
+          Σε μεγάλο παράθυρο οι κάρτες εμφανίζονται δίπλα δίπλα, σε μικρότερο η μία κάτω από την άλλη. Έως έξι εγγραφές ανά κάρτα είναι ορατές, με κύλιση για τις επιπλέον. Η Επισκόπηση χωράει χωρίς οριζόντια κύλιση στο ελάχιστο πλάτος 820 pixels. Οι σχετικές ημερομηνίες ενημερώνονται όταν αλλάζει η ημέρα.
+
+          Περιλαμβάνονται όλες οι αλλαγές της 0.4.24: κοινή λίστα νοσοκομείων/κλινικών, αφαίρεση επιλογών με διατήρηση ιστορικού και OCR προγράμματος Νοεμβρίου.
+
+          Έλεγχοι: κατηγορίες/ρόλοι, πολλαπλά ιδρύματα την ίδια ημέρα, χρονολογική σειρά, αλλαγή ημέρας/μήνα/έτους, μικρό παράθυρο και μεγάλες λίστες. Επιπλέον, πραγματική φωτογραφία με το Windows OCR, δοκιμή αναβάθμισης με διατήρηση δοκιμαστικών αρχείων/backup και εκκίνηση του εγκατεστημένου EXE.
+          '@ | Set-Content release-notes.md -Encoding utf8
+          gh release create $env:TAG OrthoOrganizer_Setup_v0_4_25_Upgrade_RC.exe SHA256SUMS.txt SOURCE_COMMIT.txt --title 'OrthoOrganizer Windows v0.4.25 RC1' --notes-file release-notes.md --prerelease --latest=false
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
