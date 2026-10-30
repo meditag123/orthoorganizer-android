@@ -1,0 +1,221 @@
+name: Build hospital and roster candidates
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hospitals-roster-candidates.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ortho-hospitals-roster-candidates
+  cancel-in-progress: true
+
+env:
+  SOURCE_COMMIT: 270a48f4b452bc7e7fbb6d43bde2925882e411fb
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 65
+    steps:
+      - name: Checkout exact private candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: meditag123/orthoorganizer-source
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install desktop dependencies
+        working-directory: source/legacy_desktop/source
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+      - name: Test desktop source and Qt import controls
+        working-directory: source/legacy_desktop/source
+        shell: pwsh
+        run: |
+          python -m compileall -q .
+          if ($LASTEXITCODE -ne 0) { throw 'Source compilation failed' }
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
+      - name: Verify the original installation and synthetic backup
+        working-directory: source
+        shell: pwsh
+        run: ./legacy_desktop/source/ci/verify_original_install.ps1
+      - name: Restore official OCR runtime and branding
+        working-directory: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $original=Join-Path $env:RUNNER_TEMP 'OrthoOrganizer_Setup_v0_4_18.exe'
+          $unpack=Join-Path $env:RUNNER_TEMP 'original-ocr-files'
+          & 7z x $original "-o$unpack" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Original installer extraction failed' }
+          $ocr=Get-ChildItem $unpack -Filter tesseract.exe -Recurse -File | Select-Object -First 1
+          if (-not $ocr) { throw 'Official Tesseract runtime missing' }
+          $dst='legacy_desktop/source/tesseract'
+          New-Item -ItemType Directory -Path $dst -Force | Out-Null
+          Copy-Item -Path (Join-Path $ocr.DirectoryName '*') -Destination $dst -Recurse -Force
+          foreach ($language in @('ell','eng')) {
+            if (-not (Test-Path "$dst/tessdata/$language.traineddata")) {
+              throw "Missing $language OCR language pack"
+            }
+          }
+          New-Item -ItemType Directory -Path 'legacy_desktop/source/assets' -Force | Out-Null
+          Copy-Item 'assets/orthoorganizer.ico' 'legacy_desktop/source/assets/orthoorganizer_full.ico' -Force
+          Copy-Item 'assets/orthoorganizer_logo.png' 'legacy_desktop/source/assets/orthoorganizer_logo.png' -Force
+      - name: Build Windows 0.4.22 and its installer
+        working-directory: source/legacy_desktop/source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./build_windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed' }
+          if (-not (Test-Path 'dist/OrthoOrganizer/OrthoOrganizer.exe')) { throw 'Desktop executable missing' }
+          if (Test-Path 'dist/OrthoOrganizer/portable.flag') { throw 'Unexpected portable mode in installed build' }
+          $makensis=Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'NSIS/makensis.exe'
+          if (-not (Test-Path $makensis)) { choco install nsis -y --no-progress }
+          if (-not (Test-Path $makensis)) { throw 'NSIS compiler missing' }
+          New-Item -ItemType Directory -Path 'dist/installer' -Force | Out-Null
+          & $makensis "/DORIGINAL_NSIS_KEY=$env:ORIGINAL_NSIS_KEY" installer_upgrade.nsi
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+      - name: Test upgrade keeps installation, archive and backup
+        working-directory: source
+        shell: pwsh
+        run: ./legacy_desktop/source/ci/test_upgrade.ps1
+      - name: Smoke test the installed executable using synthetic demo data
+        shell: pwsh
+        run: |
+          $exe=Join-Path $env:ORIGINAL_APP_DIRECTORY 'OrthoOrganizer.exe'
+          $process=Start-Process -FilePath $exe -ArgumentList '--demo' -PassThru
+          Start-Sleep -Seconds 8
+          if ($process.HasExited) { throw "Desktop exited during startup: $($process.ExitCode)" }
+          $null=$process.CloseMainWindow()
+          if (-not $process.WaitForExit(10000)) { $process.Kill() }
+          Write-Host 'PASS: installed desktop stays running with synthetic demo data.'
+      - name: Record source and installer checksum
+        working-directory: source/legacy_desktop/source/dist/installer
+        shell: pwsh
+        run: |
+          $file='OrthoOrganizer_Setup_v0_4_22_Upgrade_RC.exe'
+          $hash=(Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          "$hash  $file" | Set-Content SHA256SUMS.txt -Encoding utf8
+          "Source commit: $env:SOURCE_COMMIT" | Set-Content SOURCE_COMMIT.txt -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Windows-0.4.22-Hospitals-Roster
+          path: |
+            source/legacy_desktop/source/dist/installer/OrthoOrganizer_Setup_v0_4_22_Upgrade_RC.exe
+            source/legacy_desktop/source/dist/installer/SHA256SUMS.txt
+            source/legacy_desktop/source/dist/installer/SOURCE_COMMIT.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact private candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: meditag123/orthoorganizer-source
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Create Android platform
+        working-directory: source
+        run: flutter create --platforms=android --no-pub .
+      - name: Configure API level and Internet permission
+        working-directory: source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          gradle = Path('android/app/build.gradle.kts')
+          gradle.write_text(gradle.read_text().replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 36'))
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text()
+          permission = '<uses-permission android:name="android.permission.INTERNET" />'
+          if 'android.permission.INTERNET' not in text:
+              text = text.replace('<application', permission + '\n    <application', 1)
+          manifest.write_text(text)
+          PY
+      - name: Install Flutter dependencies
+        working-directory: source
+        run: flutter pub get
+      - name: Restore original launcher icon
+        working-directory: source
+        run: dart run flutter_launcher_icons
+      - name: Analyze Flutter source
+        working-directory: source
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Test Flutter including hospitals and legacy records
+        working-directory: source
+        run: flutter test
+      - name: Build Android 1.0.8 APK
+        working-directory: source
+        run: flutter build apk --release
+      - name: Record APK identity and checksum
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          "$BUILD_TOOLS/aapt" dump badging "$APK" | sed -n '1p' > build/app/outputs/flutter-apk/APK_IDENTITY.txt
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK" > build/app/outputs/flutter-apk/APK_CERTIFICATE.txt
+          printf 'Source commit: %s\n' "$SOURCE_COMMIT" > build/app/outputs/flutter-apk/SOURCE_COMMIT.txt
+          sha256sum "$APK" > build/app/outputs/flutter-apk/SHA256SUMS.txt
+      - name: Compare Android update identity with last successful APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          OUT=build/app/outputs/flutter-apk
+          if gh run download 40295988262 --repo meditag123/orthoorganizer-android --name OrthoOrganizer-Android-APK --dir "$RUNNER_TEMP/previous-apk"; then
+            OLD=$(find "$RUNNER_TEMP/previous-apk" -name '*.apk' | head -1)
+            "$BUILD_TOOLS/apksigner" verify --print-certs "$OLD" > "$RUNNER_TEMP/old-cert.txt"
+            NEW_CERT=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$OUT/APK_CERTIFICATE.txt")
+            OLD_CERT=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/old-cert.txt")
+            OLD_PACKAGE=$("$BUILD_TOOLS/aapt" dump badging "$OLD" | sed -n "1s/^package: name='\([^']*\)'.*/\1/p")
+            NEW_PACKAGE=$(sed -n "1s/^package: name='\([^']*\)'.*/\1/p" "$OUT/APK_IDENTITY.txt")
+            if [ -n "$NEW_CERT" ] && [ "$NEW_CERT" = "$OLD_CERT" ] && [ "$NEW_PACKAGE" = "$OLD_PACKAGE" ]; then
+              echo 'Package and signing certificate match the last successful APK.' > "$OUT/UPDATE_COMPATIBILITY.txt"
+            else
+              echo 'Candidate only: package or signing certificate differs from the last successful APK. This is not a verified in-place Android update.' > "$OUT/UPDATE_COMPATIBILITY.txt"
+              echo '::warning::Android package/signing compatibility needs review.'
+            fi
+          else
+            echo 'Previous APK comparison unavailable; in-place update compatibility is unverified.' > "$OUT/UPDATE_COMPATIBILITY.txt"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Android-1.0.8-Hospitals-Candidate
+          path: |
+            source/build/app/outputs/flutter-apk/app-release.apk
+            source/build/app/outputs/flutter-apk/*.txt
+          if-no-files-found: error
+          retention-days: 30
