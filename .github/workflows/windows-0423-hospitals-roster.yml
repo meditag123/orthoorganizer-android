@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SOURCE_COMMIT: 7045f2ba4893c50132b424bdd655d98ae60cf9bf
+  SOURCE_COMMIT: 6d5ff2ac6d1b6a0165bd12dffb470a5e636e5446
   QT_QPA_PLATFORM: offscreen
 
 jobs:
@@ -135,13 +135,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: windows-v0.4.23-rc1
+          TAG: windows-v0.4.23-rc2
         run: |
           $ErrorActionPreference='Stop'
           $existing=gh release view $env:TAG --json tagName 2>$null
           if ($LASTEXITCODE -eq 0) { throw 'Release already exists; refusing overwrite' }
           @'
-          OrthoOrganizer Windows 0.4.23 RC1
+          OrthoOrganizer Windows 0.4.23 RC2
 
           Κοινή λίστα νοσοκομείων/κλινικών στις Ρυθμίσεις, στην εισαγωγή εφημεριών, στην αποθήκευση εικόνας προγράμματος και στα χειρουργεία. Πληκτρολόγηση νέου ιδρύματος και διατήρηση προηγούμενων επιλογών.
 
@@ -151,5 +151,5 @@ jobs:
 
           Έλεγχοι: κοινή λίστα και καταχώριση νέου νοσοκομείου από τις Ρυθμίσεις, ίδια ημερομηνία ετοιμότητας σε τέσσερα ιδρύματα με ανεξάρτητα φίλτρα, πραγματική φωτογραφία, αναβάθμιση στην ίδια θέση με διατήρηση δοκιμαστικών αρχείων/backup και εκκίνηση του εγκατεστημένου EXE.
           '@ | Set-Content release-notes.md -Encoding utf8
-          gh release create $env:TAG OrthoOrganizer_Setup_v0_4_23_Upgrade_RC.exe SHA256SUMS.txt SOURCE_COMMIT.txt --title 'OrthoOrganizer Windows v0.4.23 RC1' --notes-file release-notes.md --prerelease --latest=false
+          gh release create $env:TAG OrthoOrganizer_Setup_v0_4_23_Upgrade_RC.exe SHA256SUMS.txt SOURCE_COMMIT.txt --title 'OrthoOrganizer Windows v0.4.23 RC2' --notes-file release-notes.md --prerelease --latest=false
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
