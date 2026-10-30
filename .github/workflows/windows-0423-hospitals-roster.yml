@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SOURCE_COMMIT: 53866fd448bcc721b34d377c5e2aaa0c2583232d
+  SOURCE_COMMIT: ae505b68b6c67f0cf9451f1b943a3d63e92783be
   QT_QPA_PLATFORM: offscreen
 
 jobs:
