@@ -12,15 +12,16 @@ permissions:
   actions: read
 
 concurrency:
-  group: ortho-hospitals-roster-candidates
+  group: ortho-hospitals-roster-candidates-${{ github.sha }}
   cancel-in-progress: true
 
 env:
-  SOURCE_COMMIT: 270a48f4b452bc7e7fbb6d43bde2925882e411fb
+  SOURCE_COMMIT: 33a8d728a5b33f5660cc2075ed8b5f5039ece2d1
   QT_QPA_PLATFORM: offscreen
 
 jobs:
   windows:
+    if: ${{ !contains(github.event.head_commit.message, '[android-only]') }}
     runs-on: windows-latest
     timeout-minutes: 65
     steps:
