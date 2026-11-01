@@ -1,0 +1,168 @@
+name: Admin Panel 1.3.1 Parallel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/admin-131-parallel.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: admin-131-parallel
+  cancel-in-progress: true
+
+env:
+  SOURCE_COMMIT: 406ab3a0dd9bfa82e59ef8c40ed8b73735516261
+  EXE_BASE: OrthoOrganizer-Admin-Panel_v1.3.1_PARALLEL
+  RELEASE_TAG: admin-v1.3.1-parallel-rc1
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out public build repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out pinned private source
+        uses: actions/checkout@v4
+        with:
+          repository: meditag123/orthoorganizer-source
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        working-directory: source
+        run: python -m pip install -r admin_panel_parallel/requirements-build.txt
+      - name: Original Admin regression tests
+        working-directory: source
+        run: python -m unittest discover -s admin_panel/tests -v
+      - name: Parallel Admin protocol and session tests
+        working-directory: source
+        run: python -m unittest discover -s admin_panel_parallel/tests -v
+      - name: Offline Windows GUI integration
+        working-directory: source
+        env:
+          ORTHO_ADMIN_CAPTURE: ${{ github.workspace }}/validation
+        run: python admin_panel_parallel/tests/ui_smoke.py
+      - name: Build separate executable
+        working-directory: source
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "$env:EXE_BASE" --icon assets/orthoorganizer.ico --version-file admin_panel_parallel/version_info.txt --add-data 'assets/orthoorganizer.ico;assets' --paths admin_panel_parallel --hidden-import winotify admin_panel_parallel/app.py
+          if ($LASTEXITCODE -ne 0) { throw 'Admin executable build failed' }
+      - name: Build per-user Admin installer and verify in-place update
+        working-directory: source
+        shell: pwsh
+        run: |
+          $compiler = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $compiler)) { choco install nsis -y --no-progress }
+          & $compiler admin_panel_parallel/installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw 'Admin installer build failed' }
+          $target = Join-Path $env:RUNNER_TEMP 'admin-parallel-upgrade'
+          New-Item -ItemType Directory -Force $target | Out-Null
+          $baseline = Join-Path $target 'OrthoOrganizer-Admin-Panel_PARALLEL.exe'
+          Invoke-WebRequest 'https://github.com/meditag123/orthoorganizer-android/releases/download/admin-v1.3.0-parallel-rc1/OrthoOrganizer-Admin-Panel_v1.3.0_PARALLEL.exe' -OutFile $baseline
+          if ((Get-FileHash $baseline -Algorithm SHA256).Hash.ToLower() -ne '3223a0f81671cf41e172ff2143b13e133db3a1bde4b8b795f66adba8168275d2') { throw 'Wrong baseline Admin' }
+          $readState = Join-Path $env:LOCALAPPDATA 'OrthoOrganizerAdminParallel'
+          New-Item -ItemType Directory -Force $readState | Out-Null
+          $marker = Join-Path $readState '_qa_upgrade_marker.txt'
+          'keep-read-state' | Set-Content $marker
+          $setup = Start-Process -FilePath 'dist/OrthoOrganizer-Admin-Setup_v1.3.1_PARALLEL.exe' -ArgumentList @('/S', "/D=$target") -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw 'Installer failed' }
+          if ((Get-FileHash $baseline).Hash -ne (Get-FileHash "dist/$env:EXE_BASE.exe").Hash) { throw 'Installed EXE mismatch' }
+          if ((Get-Content $marker) -ne 'keep-read-state') { throw 'Read markers changed' }
+          if ((Get-Item $baseline).VersionInfo.FileVersion -ne '1.3.1.0') { throw 'Admin update did not replace old version' }
+          'ADMIN_INSTALLER_UPGRADE_OK'
+      - name: Launch packaged EXE and verify parallel identity
+        working-directory: source
+        shell: pwsh
+        run: |
+          $exePath = Join-Path (Get-Location) "dist/$env:EXE_BASE.exe"
+          $info = (Get-Item $exePath).VersionInfo
+          if ($info.ProductName -ne 'OrthoOrganizer Admin Panel Parallel') { throw 'Wrong ProductName' }
+          if ($info.FileVersion -ne '1.3.1.0') { throw 'Wrong FileVersion' }
+          $program = Start-Process -FilePath $exePath -PassThru
+          try {
+            $found = $null
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              $found = Get-Process | Where-Object { $_.ProcessName -eq $env:EXE_BASE -and $_.MainWindowTitle -like '*Admin Panel 1.3.1*' } | Select-Object -First 1
+              if ($found) { break }
+              $program.Refresh()
+              if ($program.HasExited) { throw "Executable exited: $($program.ExitCode)" }
+            }
+            if (-not $found) { throw 'Parallel Admin login window did not open' }
+            "EXE_STARTUP_OK: $($found.MainWindowTitle)"
+          } finally {
+            Get-Process | Where-Object { $_.ProcessName -eq $env:EXE_BASE } | Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+      - name: Package release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "source/dist/$env:EXE_BASE.exe" out/
+          Copy-Item source/dist/OrthoOrganizer-Admin-Setup_v1.3.1_PARALLEL.exe out/
+          $metadata = [ordered]@{
+            version = '1.3.1'; channel = 'parallel'; source_commit = $env:SOURCE_COMMIT
+            source_repository = 'meditag123/orthoorganizer-source'
+            compatible_windows = '0.4.26'; compatible_android = '0.6.18'
+            app_id = 'OrthoOrganizer.Admin.Parallel'
+            original_admin_tests = 13; parallel_unit_tests = 28; gui_integration_tests = 5
+            real_firebase_login_tested = $false
+          }
+          $metadata | ConvertTo-Json | Set-Content -Encoding utf8 out/BUILD_INFO.json
+          @"
+          OrthoOrganizer Admin Panel 1.3.1 Parallel
+          Open $env:EXE_BASE.exe and use your existing active Firebase Admin account.
+          Shared user accounts and support tickets; separate local read markers.
+          Source: https://github.com/meditag123/orthoorganizer-source/archive/$env:SOURCE_COMMIT.zip
+          Source folder: admin_panel_parallel
+          Windows 0.4.26 / Android 0.6.18 Parallel
+          "@ | Set-Content -Encoding utf8 out/README.txt
+          $hash = (Get-FileHash "out/$env:EXE_BASE.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $env:EXE_BASE.exe" | Set-Content -Encoding ascii out/SHA256SUMS.txt
+          $setupHash = (Get-FileHash out/OrthoOrganizer-Admin-Setup_v1.3.1_PARALLEL.exe -Algorithm SHA256).Hash.ToLower()
+          "$setupHash  OrthoOrganizer-Admin-Setup_v1.3.1_PARALLEL.exe" | Add-Content -Encoding ascii out/SHA256SUMS.txt
+          Compress-Archive -Path out/OrthoOrganizer-Admin-Setup_v1.3.1_PARALLEL.exe,"out/$env:EXE_BASE.exe",out/BUILD_INFO.json,out/README.txt,out/SHA256SUMS.txt -DestinationPath "out/$env:EXE_BASE.zip"
+          $zipHash = (Get-FileHash "out/$env:EXE_BASE.zip" -Algorithm SHA256).Hash.ToLower()
+          "$zipHash  $env:EXE_BASE.zip" | Add-Content -Encoding ascii out/SHA256SUMS.txt
+      - name: Publish parallel Admin release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          @"
+          Independent Windows Admin Panel 1.3.1 Parallel for OrthoOrganizer Windows 0.4.26 and Android 0.6.18 Parallel.
+
+          Separate executable, Windows application identity and local read markers. Uses existing Firebase Admin accounts and the shared user/support collections. Includes approvals, roles, protected Owner, registered-device display and support conversations with explicit reply submission.
+
+          Fixed invalid legacy account-mirror path, Firestore array encoding and stale callbacks/token refresh after sign-out. Offline tests: 13 original Admin, 28 parallel protocol/session tests and 5 Windows GUI integrations. Packaged EXE startup also verified. Production Firebase login/rules are not exercised or deployed by this workflow. Current apps do not enforce sessionVersion or device limits; Android currently submits support requests without an inbox for replies.
+
+          [Unified private source ZIP](https://github.com/meditag123/orthoorganizer-source/archive/$env:SOURCE_COMMIT.zip) — includes Windows, native Android and admin_panel_parallel.
+          "@ | Set-Content -Encoding utf8 release-notes.md
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title 'Admin Panel 1.3.1 Parallel' --notes-file release-notes.md --prerelease
+          } else {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Admin Panel 1.3.1 Parallel' --notes-file release-notes.md --prerelease --latest=false
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
+          gh release upload $env:RELEASE_TAG out/OrthoOrganizer-Admin-Setup_v1.3.1_PARALLEL.exe "out/$env:EXE_BASE.exe" "out/$env:EXE_BASE.zip" out/BUILD_INFO.json out/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Admin-1.3.1-Parallel-Validation
+          path: |
+            out/
+            validation/
+          if-no-files-found: warn
