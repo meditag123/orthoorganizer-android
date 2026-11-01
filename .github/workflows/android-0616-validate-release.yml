@@ -1,0 +1,179 @@
+name: Validate and publish signed Android 0.6.16
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-0616-validate-release.yml'
+      - '.candidates/android-0616/**'
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: ortho-native-android-0616-validate
+  cancel-in-progress: true
+
+env:
+  SOURCE_COMMIT: 58db94fd08832b4ecf737204b6558cf644118d7d
+  TEST_SOURCE_COMMIT: 58db94fd08832b4ecf737204b6558cf644118d7d
+  PRODUCER_RUN: 41338028109
+  TEST_PRODUCER_RUN: 41338028109
+  EXPECTED_ANDROID_CERT: 5f35eab978eb34aae7a0d4c467ca838ddb83d6dddc081cca8129f1bc040e4fc5
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout signed candidates and validation workflow
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout exact private test source
+        uses: actions/checkout@v4
+        with:
+          repository: meditag123/orthoorganizer-source
+          ref: ${{ env.TEST_SOURCE_COMMIT }}
+          token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify signed identity, checksums and source metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd .candidates/android-0616 && sha256sum -c SHA256SUMS.txt)
+          grep -Fq "$SOURCE_COMMIT" .candidates/android-0616/SOURCE_COMMIT.txt
+          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner" || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'build-tools;35.0.0'
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          mkdir -p dist baseline
+          cp .candidates/android-0616/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk dist/
+          cp .candidates/android-0616/OrthoOrganizerMobile_v0.6.16_TESTS.apk dist/
+          cp .candidates/android-0616/OrthoOrganizerMobile_v0.6.15_PARALLEL.apk baseline/
+          curl --fail --location --retry 3 'https://github.com/meditag123/orthoorganizer-releases/releases/download/v0.6.13/OrthoOrganizerMobile_v0.6.13.apk' -o baseline/OrthoOrganizerMobile_v0.6.13.apk
+          echo 'df5e7797d4983554bdced8de5de4adc3e3b37b6ed445e7e43548fa2d849815bd  baseline/OrthoOrganizerMobile_v0.6.13.apk' | sha256sum -c -
+          "$tools/apksigner" verify --print-certs baseline/OrthoOrganizerMobile_v0.6.13.apk | tee original-identity.txt
+          grep -Fq 'c7bfcfa3a101d22a373ad3081f4ba604f6de0219e845d6ab2fedb158c7003cc3' original-identity.txt
+          for file in dist/*.apk baseline/*PARALLEL.apk; do
+            "$tools/apksigner" verify --verbose --print-certs "$file" | tr 'A-F' 'a-f' | tee identity.txt
+            grep -Fq "$EXPECTED_ANDROID_CERT" identity.txt
+          done
+          "$tools/apksigner" verify --verbose --print-certs dist/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk > dist/APK_IDENTITY.txt
+          "$tools/aapt" dump badging dist/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk > dist/APK_BADGING.txt
+          grep -q "package: name='com.orthoorganizer.mobile.parallel' versionCode='24' versionName='0.6.16'" dist/APK_BADGING.txt
+          grep -q "launchable-activity: name='com.orthoorganizer.mobile.MainActivity'" dist/APK_BADGING.txt
+          (cd dist && sha256sum OrthoOrganizerMobile_v0.6.16_PARALLEL.apk > SHA256SUMS.txt)
+          cp .candidates/android-0616/SOURCE_COMMIT.txt dist/
+      - name: Verify signing preserved the exact compiled payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$PRODUCER_RUN" --repo "${GITHUB_REPOSITORY}" --name OrthoOrganizer-Android-0.6.16-Aligned-Unsigned --dir producer
+          gh run download "$TEST_PRODUCER_RUN" --repo "${GITHUB_REPOSITORY}" --name OrthoOrganizer-Android-0.6.16-Aligned-Unsigned --dir test-producer
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          pairs=[('producer/OrthoOrganizerMobile_v0.6.16_UNSIGNED.apk','dist/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk'),('test-producer/OrthoOrganizerMobile_v0.6.16_TESTS_UNSIGNED.apk','dist/OrthoOrganizerMobile_v0.6.16_TESTS.apk')]
+          for unsigned,signed in pairs:
+              def payload(path):
+                  with zipfile.ZipFile(path) as archive:
+                      return {name:archive.read(name) for name in archive.namelist() if not name.upper().startswith('META-INF/')}
+              if payload(unsigned)!=payload(signed): raise SystemExit('Signed payload differs from compiled APK: '+signed)
+              print('PASS: exact compiled code/resources retained:',Path(signed).name)
+          PY
+      - name: Enable hardware acceleration
+        run: |
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+      - name: Test signed upgrade and native UI on Android 15
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 2048
+          script: bash source/android_reconstruction/run_0616_emulator_checks.sh
+      - name: Preserve Android 15 evidence
+        if: always()
+        run: if [ -d dist/qa ]; then mv dist/qa dist/qa-android15; fi
+      - name: Test signed upgrade and safe bounds on Android 9
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 28
+          target: default
+          arch: x86_64
+          avd-name: ortho-api28
+          disable-animations: true
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 2048
+          script: bash source/android_reconstruction/run_0616_emulator_checks.sh
+      - name: Preserve Android 9 evidence
+        if: always()
+        run: if [ -d dist/qa ]; then mv dist/qa dist/qa-android9; fi
+      - name: Retain emulator test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Android-0.6.16-Android15-Reports
+          path: |
+            dist/qa-android15/
+            dist/qa-android9/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Retain tested Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Android-0.6.16-Hospitals-Overview
+          path: |
+            dist/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk
+            dist/SHA256SUMS.txt
+            dist/SOURCE_COMMIT.txt
+            dist/APK_IDENTITY.txt
+            dist/APK_BADGING.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish tested Android candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=android-v0.6.16-parallel-rc1
+          cat > dist/RELEASE_NOTES.md <<'NOTES'
+          OrthoOrganizer Android 0.6.16 — παράλληλη έκδοση
+
+          Διορθώνει τις διαφορές της 0.6.15 στο εικονίδιο και στην απόσταση της κεφαλίδας από την ώρα και τις ειδοποιήσεις.
+
+          Επαναφέρει το αρχικό adaptive εικονίδιο και το αρχικό γραφικό κεφαλίδας/μενού. Τα περιθώρια ακολουθούν τις πραγματικές μπάρες, την εγκοπή οθόνης και το πληκτρολόγιο. Οι μπάρες έχουν ξανά σκούρο φόντο και λευκά σύμβολα.
+
+          Διατηρεί τη διαχείριση πολλών νοσοκομείων, τα φίλτρα και τις νέες κάρτες Ενεργές/Ετοιμότητας.
+
+          Αναβαθμίζει την παράλληλη 0.6.15 με το ίδιο package και πιστοποιητικό. Η αρχική 0.6.13 παραμένει ξεχωριστή εγκατάσταση.
+
+          Έλεγχοι: κρυπτογραφημένο πρωτόκολλο, 11 έλεγχοι ιδρυμάτων/ημερομηνιών, επαλήθευση υπογραφής και compiled payload, αναβάθμιση με διατήρηση δοκιμαστικών δεδομένων, σύγκριση εικονιδίων pixel προς pixel με την αρχική 0.6.13, πλήρης native οθόνη και όρια κεφαλίδας/μενού/πληκτρολογίου σε Android 15 και Android 9. Στο Android 15 ελέγχονται πλοήγηση με κουμπιά, χειρονομίες και εγκοπή οθόνης.
+
+          Συνθετικά δεδομένα, χωρίς έλεγχο πραγματικού λογαριασμού ή συγχρονισμό προσωπικού αρχείου. Το manifest αυτόματων ενημερώσεων δεν αλλάζει.
+          NOTES
+          if gh release view "$tag" >/dev/null 2>&1; then
+            mkdir -p existing-release
+            gh release download "$tag" --pattern OrthoOrganizerMobile_v0.6.16_PARALLEL.apk --dir existing-release
+            cmp dist/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk existing-release/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk
+            gh release upload "$tag" dist/qa-android15/overview-device.png --clobber
+            gh release edit "$tag" --notes-file dist/RELEASE_NOTES.md
+          else
+            gh release create "$tag" dist/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk dist/SHA256SUMS.txt dist/SOURCE_COMMIT.txt dist/APK_IDENTITY.txt dist/qa-android15/overview-device.png --title 'OrthoOrganizer Android 0.6.16 Parallel RC1' --notes-file dist/RELEASE_NOTES.md --prerelease --latest=false
+          fi
