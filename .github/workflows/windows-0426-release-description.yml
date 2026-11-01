@@ -1,0 +1,32 @@
+name: Update Windows 0.4.26 release description
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/windows-0426-release-description.yml']
+permissions:
+  contents: write
+jobs:
+  notes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update feature and validation description
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          cat > release-notes.md <<'NOTES'
+          OrthoOrganizer Windows 0.4.26 RC1
+          
+          Διορθωμένη αναγνώριση φωτογραφημένων πινάκων εφημεριών με σκίαση, γραμμές οθόνης και μικρή κλίση. Σωστή αντιστοίχιση ημερομηνιών και ρόλων 1ος/2ος/3ος.
+          
+          Σε πίνακα μόνο ενεργών εφημεριών, ημέρα με ένα μοναδικό όνομα συνολικά στις στήλες αναγνωρίζεται ως κλειστή. Οι στήλες ετοιμότητας παραμένουν ξεχωριστές.
+          
+          Δυναμική Επισκόπηση: ξεχωριστή κάρτα μόνο για κάθε τύπο που έχει ο χρήστης στις επόμενες εγγραφές του. Ενεργές 1ος/2ος/3ος, Μικτές, Ετοιμότητας, Κλειστές κ.λπ. Δεν εμφανίζονται άδειες κατηγορίες. Διατηρούνται τα νοσοκομεία/κλινικές και η προσαρμογή στο μέγεθος παραθύρου.
+          
+          Έλεγχοι πηγαίου κώδικα, Qt εισαγωγής/Επισκόπησης, δύο πραγματικών δειγμάτων με το ενσωματωμένο Windows OCR, αναβάθμισης με διατήρηση δοκιμαστικών αρχείων/backup και εκκίνησης του εγκατεστημένου EXE.
+          
+          Δοκιμαστική έκδοση. Δεν προσπελάστηκαν πραγματικοί λογαριασμοί και δεν άλλαξε το manifest αυτόματων ενημερώσεων.
+          NOTES
+          gh release edit windows-v0.4.26-rc1 --notes-file release-notes.md
