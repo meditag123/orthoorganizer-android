@@ -1,0 +1,80 @@
+name: Build native Android 0.6.16 source
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-0616-hospitals-overview.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ortho-native-android-0616-build
+  cancel-in-progress: true
+
+env:
+  SOURCE_COMMIT: 58db94fd08832b4ecf737204b6558cf644118d7d
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact private source
+        uses: actions/checkout@v4
+        with:
+          repository: meditag123/orthoorganizer-source
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify SDK and encrypted protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$ANDROID_HOME/platforms/android-35" || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'platforms;android-35'
+          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign" || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'build-tools;35.0.0'
+          python -m pip install cryptography==44.0.2
+          bash source/android_legacy_cloud_compat/scripts/run_jvm_tests.sh
+      - name: Prepare complete native project
+        run: bash source/android_reconstruction/prepare_0616_project.sh "$GITHUB_WORKSPACE/native-build"
+      - name: Test institutions/dates and compile system UI regression checks
+        working-directory: native-build
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleRelease :app:assembleDebugAndroidTest
+      - name: Align unsigned APKs for local signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p unsigned
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/zipalign" -p -f 4 native-build/app/build/outputs/apk/release/app-release-unsigned.apk unsigned/OrthoOrganizerMobile_v0.6.16_UNSIGNED.apk
+          "$tools/zipalign" -p -f 4 native-build/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk unsigned/OrthoOrganizerMobile_v0.6.16_TESTS_UNSIGNED.apk
+          cp "$tools/lib/apksigner.jar" unsigned/apksigner.jar
+          printf 'Source commit: %s\n' "$SOURCE_COMMIT" > unsigned/SOURCE_COMMIT.txt
+          (cd unsigned && sha256sum *.apk apksigner.jar > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Android-0.6.16-Aligned-Unsigned
+          path: unsigned/
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: OrthoOrganizer-Android-0.6.16-JVM-Reports
+          path: native-build/app/build/reports/tests/
+          retention-days: 30
+          if-no-files-found: ignore
