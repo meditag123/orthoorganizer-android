@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SOURCE_COMMIT: 32dec19d75e242d50bcc13cb683470934a394cc5
+  SOURCE_COMMIT: 1d5a47c2b8e4e488a8d614600e01bc05f487df81
 
 jobs:
   build:
