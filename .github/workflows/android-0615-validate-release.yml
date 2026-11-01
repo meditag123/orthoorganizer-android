@@ -18,6 +18,7 @@ concurrency:
 
 env:
   SOURCE_COMMIT: 32dec19d75e242d50bcc13cb683470934a394cc5
+  TEST_SOURCE_COMMIT: 0788077f33b96903a9ddb00fb172bae2227b5994
   PRODUCER_RUN: 41303668955
   EXPECTED_ANDROID_CERT: 5f35eab978eb34aae7a0d4c467ca838ddb83d6dddc081cca8129f1bc040e4fc5
 
@@ -34,7 +35,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: meditag123/orthoorganizer-source
-          ref: ${{ env.SOURCE_COMMIT }}
+          ref: ${{ env.TEST_SOURCE_COMMIT }}
           token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
           persist-credentials: false
           path: source
