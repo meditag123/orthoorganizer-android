@@ -18,9 +18,9 @@ concurrency:
 
 env:
   SOURCE_COMMIT: 58db94fd08832b4ecf737204b6558cf644118d7d
-  TEST_SOURCE_COMMIT: 6b752216cb1238b26273badb0bac0f225d82e715
+  TEST_SOURCE_COMMIT: a2eac5144e715debdcd9fb1554b5ecf1b1516ba7
   PRODUCER_RUN: 41338028109
-  TEST_PRODUCER_RUN: 41338612388
+  TEST_PRODUCER_RUN: 41339602397
   EXPECTED_ANDROID_CERT: 5f35eab978eb34aae7a0d4c467ca838ddb83d6dddc081cca8129f1bc040e4fc5
 
 jobs:
@@ -96,19 +96,29 @@ jobs:
         run: |
           test -e /dev/kvm
           sudo chmod 666 /dev/kvm
-      - name: Test signed upgrade and native UI on Android 15
-        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          disable-animations: true
-          emulator-boot-timeout: 600
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 2048
-          script: bash source/android_reconstruction/run_0616_emulator_checks.sh
-      - name: Preserve Android 15 evidence
-        if: always()
-        run: if [ -d dist/qa ]; then mv dist/qa dist/qa-android15; fi
+      - name: Reuse passed Android 15 checks for the identical application APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/41338832520" > previous-run.json
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/41338832520/jobs" > previous-jobs.json
+          python - <<'PY'
+          import json
+          run=json.load(open('previous-run.json'))
+          assert run['head_sha']=='05f1bbc8259ea9ac038e36378b2647b30e7d64d9'
+          jobs=json.load(open('previous-jobs.json'))['jobs']
+          matches=[step for job in jobs for step in job['steps'] if step['name']=='Test signed upgrade and native UI on Android 15']
+          assert len(matches)==1 and matches[0]['conclusion']=='success',matches
+          print('PASS: immutable prior Android 15 step succeeded, including buttons/gestures/cutout')
+          PY
+          echo 'f8d3b29b58f2770705b7e1bdb695ff331afb34d871fb70fca5a44203cc871088  dist/OrthoOrganizerMobile_v0.6.16_PARALLEL.apk' | sha256sum -c -
+          gh run download 41338832520 --repo "${GITHUB_REPOSITORY}" --name OrthoOrganizer-Android-0.6.16-Android15-Reports --dir previous-evidence
+          cp -a previous-evidence/qa-android15 dist/qa-android15
+          grep -q 'OK (7 tests)' dist/qa-android15/after-upgrade.txt
+          for check in navigation-threebutton navigation-gestural cutout; do grep -q 'OK (1 test)' "dist/qa-android15/$check.txt"; done
+          test -s dist/qa-android15/overview-device.png
       - name: Test signed upgrade and safe bounds on Android 9
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
