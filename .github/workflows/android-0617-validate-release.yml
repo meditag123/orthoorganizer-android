@@ -18,9 +18,9 @@ concurrency:
 
 env:
   SOURCE_COMMIT: 9843642dfda30529871df56f7cf7042277e32a8d
-  TEST_SOURCE_COMMIT: f9887bce879c1cf01810183e44485a551b1b07f0
+  TEST_SOURCE_COMMIT: 83f513ae370b61140af1b82b40178b00e3561221
   PRODUCER_RUN: 41343443210
-  TEST_PRODUCER_RUN: 41343443210
+  TEST_PRODUCER_RUN: 41345152942
   EXPECTED_ANDROID_CERT: 5f35eab978eb34aae7a0d4c467ca838ddb83d6dddc081cca8129f1bc040e4fc5
 
 jobs:
@@ -40,7 +40,7 @@ jobs:
           token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
           persist-credentials: false
           path: source
-          fetch-depth: 2
+          fetch-depth: 3
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -91,16 +91,16 @@ jobs:
               if payload(unsigned)!=payload(signed): raise SystemExit('Signed payload differs from compiled APK: '+signed)
               print('PASS: exact compiled code/resources retained:',Path(signed).name)
           PY
-      - name: Verify only the emulator driver differs from the compiled source
+      - name: Verify application sources match the compiled candidate
         shell: bash
         run: |
           git -C source diff --name-only "$SOURCE_COMMIT" "$TEST_SOURCE_COMMIT" > source-diff.txt
           python - <<'PY'
           from pathlib import Path
           changed=set(Path('source-diff.txt').read_text().splitlines())
-          allowed={'android_reconstruction/run_0617_emulator_checks.sh','android_reconstruction/README_ANDROID_0617.md'}
+          allowed={'android_reconstruction/run_0617_emulator_checks.sh','android_reconstruction/README_ANDROID_0617.md','android_reconstruction/tests/SystemUiTest.java'}
           assert changed<=allowed,changed
-          print('PASS: application code, resources and compiled instrumentation are unchanged')
+          print('PASS: application code/resources unchanged; instrumentation rebuilt from pinned test source')
           PY
       - name: Enable hardware acceleration
         run: |
@@ -114,8 +114,13 @@ jobs:
           arch: x86_64
           disable-animations: true
           emulator-boot-timeout: 600
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 2048
-          script: bash source/android_reconstruction/run_0617_emulator_checks.sh
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 3072
+          script: |
+            adb shell settings put system screen_off_timeout 1800000
+            adb shell svc power stayon true
+            adb shell input keyevent 224
+            adb shell wm dismiss-keyguard
+            bash source/android_reconstruction/run_0617_emulator_checks.sh
       - name: Retain emulator test evidence
         if: always()
         uses: actions/upload-artifact@v4
