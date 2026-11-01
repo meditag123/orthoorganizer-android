@@ -1,0 +1,147 @@
+name: Build and publish native Android 0.6.15
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-0615-hospitals-overview.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: ortho-native-android-0615
+  cancel-in-progress: true
+
+env:
+  SOURCE_COMMIT: ae3ce57dc3236627e41f1dc3eb2de15d36ecbd9d
+  EXPECTED_ANDROID_CERT: 5f35eab978eb34aae7a0d4c467ca838ddb83d6dddc081cca8129f1bc040e4fc5
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact private source
+        uses: actions/checkout@v4
+        with:
+          repository: meditag123/orthoorganizer-source
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify Android SDK and encrypted protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$ANDROID_HOME/platforms/android-35" || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'platforms;android-35'
+          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner" || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'build-tools;35.0.0'
+          python -m pip install cryptography==44.0.2
+          bash source/android_legacy_cloud_compat/scripts/run_jvm_tests.sh
+      - name: Prepare complete native project
+        shell: bash
+        run: bash source/android_reconstruction/prepare_0615_project.sh "$GITHUB_WORKSPACE/native-build"
+      - name: Run institution and calendar tests, build release and instrumentation
+        working-directory: native-build
+        shell: bash
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleRelease :app:assembleDebugAndroidTest
+      - name: Sign using the existing private parallel key and verify identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.ORTHO_SOURCE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p _signing baseline dist
+          chmod 700 _signing
+          gh run download 38969006231 --repo meditag123/orthoorganizer-source --name PRIVATE-OrthoOrganizer-Parallel-Signing-Backup-KEEP-SAFE --dir _signing
+          gh run download 38969006231 --repo meditag123/orthoorganizer-source --name OrthoOrganizer-Android-0.6.14-Parallel-APK --dir baseline
+          test -s _signing/ortho-parallel.p12
+          test -s _signing/KEY_PASSWORD.txt
+          chmod 600 _signing/*
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/zipalign" -p -f 4 native-build/app/build/outputs/apk/release/app-release-unsigned.apk aligned-release.apk
+          "$tools/apksigner" sign --ks _signing/ortho-parallel.p12 --ks-key-alias ortho-parallel --ks-pass file:_signing/KEY_PASSWORD.txt --out dist/OrthoOrganizerMobile_v0.6.15_PARALLEL.apk aligned-release.apk
+          "$tools/zipalign" -p -f 4 native-build/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk aligned-tests.apk
+          "$tools/apksigner" sign --ks _signing/ortho-parallel.p12 --ks-key-alias ortho-parallel --ks-pass file:_signing/KEY_PASSWORD.txt --out dist/OrthoOrganizerMobile_v0.6.15_TESTS.apk aligned-tests.apk
+          "$tools/apksigner" verify --verbose --print-certs dist/OrthoOrganizerMobile_v0.6.15_PARALLEL.apk | tee dist/APK_IDENTITY.txt
+          tr 'A-F' 'a-f' < dist/APK_IDENTITY.txt | grep -Fq "$EXPECTED_ANDROID_CERT"
+          "$tools/apksigner" verify --verbose --print-certs dist/OrthoOrganizerMobile_v0.6.15_TESTS.apk | tr 'A-F' 'a-f' | grep -Fq "$EXPECTED_ANDROID_CERT"
+          "$tools/aapt" dump badging dist/OrthoOrganizerMobile_v0.6.15_PARALLEL.apk > dist/APK_BADGING.txt
+          grep -q "package: name='com.orthoorganizer.mobile.parallel' versionCode='23' versionName='0.6.15'" dist/APK_BADGING.txt
+          grep -q "launchable-activity: name='com.orthoorganizer.mobile.MainActivity'" dist/APK_BADGING.txt
+          # Keys never enter artifacts, source archives or releases.
+          rm -rf _signing
+          (cd dist && sha256sum OrthoOrganizerMobile_v0.6.15_PARALLEL.apk > SHA256SUMS.txt)
+          printf 'Source commit: %s\n' "$SOURCE_COMMIT" > dist/SOURCE_COMMIT.txt
+      - name: Enable hardware acceleration for the Android test device
+        shell: bash
+        run: |
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+      - name: Test upgrade and native UI on Android 15
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 2048
+          script: bash source/android_reconstruction/run_0615_emulator_checks.sh
+      - name: Retain test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Android-0.6.15-Test-Reports
+          path: |
+            native-build/app/build/reports/tests/
+            dist/qa/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Retain verified APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrthoOrganizer-Android-0.6.15-Hospitals-Overview
+          path: |
+            dist/OrthoOrganizerMobile_v0.6.15_PARALLEL.apk
+            dist/SHA256SUMS.txt
+            dist/SOURCE_COMMIT.txt
+            dist/APK_IDENTITY.txt
+            dist/APK_BADGING.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish the tested Android candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag=android-v0.6.15-parallel-rc1
+          if gh release view "$tag" >/dev/null 2>&1; then echo 'Release already exists; refusing overwrite.' >&2; exit 1; fi
+          cat > dist/RELEASE_NOTES.md <<'NOTES'
+          OrthoOrganizer Android 0.6.15 — παράλληλη έκδοση
+
+          Ενημέρωση της παράλληλης native 0.6.14 με το ίδιο package και κλειδί υπογραφής. Η αρχική 0.6.13 παραμένει ξεχωριστή εγκατάσταση.
+
+          Κοινή λίστα νοσοκομείων/κλινικών στις Ρυθμίσεις, στα χειρουργεία και στις δύο φόρμες εισαγωγής προγράμματος. Προσθήκη και αφαίρεση επιλογών με διατήρηση παλιών εγγραφών και φίλτρων ιστορικού.
+
+          Φίλτρα ανά νοσοκομείο στις εφημερίες, στο αρχείο χειρουργείων και στα στατιστικά. Κάρτες Ενεργές/Ετοιμότητας με ημερομηνία, ημέρα, ίδρυμα, ρόλο και χρόνο που απομένει. Κλειστές εφημερίες σε ξεχωριστή κάρτα. Το αρχικό εικονίδιο 0.6.13 διατηρείται.
+
+          Έλεγχοι: πρωτόκολλο κρυπτογραφημένου αρχείου, JSON/ιστορικό ιδρυμάτων, ημερομηνίες, ίδια ημέρα σε πολλά ιδρύματα, Android 15 UI και πραγματική αναβάθμιση της υπογεγραμμένης παράλληλης 0.6.14 με διατήρηση ιδιωτικού δοκιμαστικού στοιχείου.
+
+          Η δοκιμή χρησιμοποιεί αποκλειστικά συνθετικά δεδομένα. Σύνδεση πραγματικού λογαριασμού και συγχρονισμός με πραγματικό αρχείο δεν ελέγχονται στο CI. Το production manifest αυτόματων ενημερώσεων δεν αλλάζει.
+          NOTES
+          gh release create "$tag" dist/OrthoOrganizerMobile_v0.6.15_PARALLEL.apk dist/SHA256SUMS.txt dist/SOURCE_COMMIT.txt dist/APK_IDENTITY.txt dist/qa/overview.png --title 'OrthoOrganizer Android 0.6.15 Parallel RC1' --notes-file dist/RELEASE_NOTES.md --prerelease --latest=false
